@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ivrydb-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ivrypassword
+      POSTGRES_DB: ivry_admin
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  backend:
+    build: 
+      context: ./backend
+    container_name: ivrydb-api
+    restart: always
+    environment:
+      - PORT=3003
+      - JWT_SECRET=ivry-secret-key-2026
+    volumes:
+      - ./backend/data:/app/data
+    ports:
+      - "3003:3003"
+    depends_on:
+      - db
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: ivrydb-web
+    restart: always
+    ports:
+      - "5003:5003"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
