@@ -268,11 +268,29 @@ td { padding: 20px; border-bottom: 1px solid var(--border); color: #e2e8f0; vert
   font-size: 0.95rem; 
   line-height: 1.6;
 }
+.console-footer { 
+  display: flex; 
+  justify-content: space-between; 
+  align-items: center; 
+  margin-top: 8px;
+}
+.status-messages { flex: 1; }
+.status-success {
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  color: var(--success);
+  padding: 10px 16px;
+  border-radius: 10px;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: fit-content;
+}
 .run-btn { 
-  align-self: flex-end; 
   background: var(--primary); 
   color: white; 
-  padding: 10px 24px; 
+  padding: 12px 28px; 
   border-radius: 12px; 
   display: flex; 
   align-items: center; 

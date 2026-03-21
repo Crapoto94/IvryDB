@@ -21,6 +21,7 @@ function App() {
   const [sqlQuery, setSqlQuery] = useState('');
   
   const [error, setError] = useState(null);
+  const [success, setSuccess] = useState(null);
   const [loading, setLoading] = useState(false);
 
   // App Login State
@@ -183,10 +184,18 @@ function App() {
 
   const runQuery = async () => {
     setLoading(true);
-    const res = await apiFetch('/api/db/query', { method: 'POST', body: JSON.stringify({ query: sqlQuery }) });
-    const result = await res.json();
-    if (res.ok) { setData(result); setError(null); }
-    else setError(result.error);
+    setSuccess(null);
+    setError(null);
+    try {
+      const res = await apiFetch('/api/db/query', { method: 'POST', body: JSON.stringify({ query: sqlQuery }) });
+      const result = await res.json();
+      if (res.ok) { 
+        setData(result); 
+        setSuccess('Command executed successfully');
+      } else { 
+        setError(result.error); 
+      }
+    } catch (err) { setError('Network Error'); }
     setLoading(false);
   };
 
@@ -432,7 +441,13 @@ function App() {
                 {view === 'console' && (
                   <div className="console-wrapper glass-panel">
                     <textarea value={sqlQuery} onChange={e => setSqlQuery(e.target.value)} placeholder="ENTER SQL QUERY..." />
-                    <button className="run-btn" onClick={runQuery} disabled={loading}><Play size={16} /> Execute</button>
+                    <div className="console-footer">
+                       <div className="status-messages">
+                         {success && <div className="status-success animate-fade-in"><CheckCircle2 size={16} /> {success}</div>}
+                         {error && <div className="error-card animate-fade-in"><AlertCircle size={16} /> {error}</div>}
+                       </div>
+                       <button className="run-btn" onClick={runQuery} disabled={loading}><Play size={16} /> Execute</button>
+                    </div>
                   </div>
                 )}
                 
