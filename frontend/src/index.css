@@ -59,6 +59,7 @@ input, textarea { outline: none; transition: border-color 0.2s; }
   font-size: 2.5rem;
   font-weight: 800;
   background: linear-gradient(135deg, #f8fafc 0%, #94a3b8 100%);
+  background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   letter-spacing: -0.05em;
@@ -238,6 +239,21 @@ td { padding: 20px; border-bottom: 1px solid var(--border); color: #e2e8f0; vert
 .tab { padding: 12px 24px; color: var(--text-muted); font-weight: 700; font-size: 0.9rem; border-radius: 10px; background: transparent; }
 .tab.active { background: #0f172a; color: var(--primary); box-shadow: inset 0 2px 4px rgba(0,0,0,0.2); }
 .nav-info { display: flex; align-items: center; gap: 10px; font-size: 0.85rem; color: var(--text-muted); font-weight: 600; }
+.nav-actions { display: flex; gap: 12px; }
+.nav-action-btn { 
+  background: rgba(16, 185, 129, 0.1); 
+  color: var(--primary); 
+  padding: 6px 12px; 
+  border-radius: 8px; 
+  font-size: 0.75rem; 
+  font-weight: 700; 
+  display: flex; 
+  align-items: center; 
+  gap: 6px; 
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+.nav-action-btn:hover { background: var(--primary); color: white; transform: translateY(-1px); }
+.nav-action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .viewport-scroll { flex: 1; display: flex; flex-direction: column; gap: 24px; overflow: hidden; }
 .console-wrapper { padding: 24px; display: flex; flex-direction: column; gap: 16px; }

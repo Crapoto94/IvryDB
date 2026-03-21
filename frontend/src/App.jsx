@@ -30,6 +30,8 @@ function App() {
   const [isEditing, setIsEditing] = useState(false); // Can be 'connection' or 'user'
   const [connForm, setConnForm] = useState({ id: '', name: '', host: 'localhost', port: 5432, database: 'postgres', user: 'postgres', password: '' });
   const [userForm, setUserForm] = useState({ username: '', password: '' });
+  const [schemaForm, setSchemaForm] = useState({ name: '' });
+  const [tableForm, setTableForm] = useState({ name: '', columns: 'id SERIAL PRIMARY KEY, name TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP' });
 
   useEffect(() => {
     if (appToken) {
@@ -185,6 +187,32 @@ function App() {
     const result = await res.json();
     if (res.ok) { setData(result); setError(null); }
     else setError(result.error);
+    setLoading(false);
+  };
+
+  const createSchema = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    const res = await apiFetch('/api/db/query', { method: 'POST', body: JSON.stringify({ query: `CREATE SCHEMA "${schemaForm.name}"` }) });
+    if (res.ok) { 
+      alert(`Schema ${schemaForm.name} created`); 
+      setIsEditing(null); 
+      setSchemaForm({ name: '' }); 
+      fetchSchemas(); 
+    } else { alert((await res.json()).error); }
+    setLoading(false);
+  };
+
+  const createTable = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    const res = await apiFetch('/api/db/query', { method: 'POST', body: JSON.stringify({ query: `CREATE TABLE "${selectedSchema}"."${tableForm.name}" (${tableForm.columns})` }) });
+    if (res.ok) { 
+      alert(`Table ${tableForm.name} created in ${selectedSchema}`); 
+      setIsEditing(null); 
+      setTableForm({ name: '', columns: 'id SERIAL PRIMARY KEY, name TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP' }); 
+      fetchTablesForSchema(selectedSchema); 
+    } else { alert((await res.json()).error); }
     setLoading(false);
   };
 
@@ -394,6 +422,10 @@ function App() {
                 <div className="nav-info">
                   <Server size={14} /> {selectedSchema} / {selectedTable || 'No Selection'}
                 </div>
+                <div className="nav-actions">
+                   <button className="nav-action-btn" onClick={() => setIsEditing('schema')} title="New Schema"><Plus size={14}/> Schema</button>
+                   <button className="nav-action-btn" onClick={() => setIsEditing('table')} title="New Table" disabled={!selectedSchema}><Plus size={14}/> Table</button>
+                </div>
              </header>
 
              <div className="viewport-scroll">
@@ -449,7 +481,7 @@ function App() {
                   <button type="submit" className="btn-primary">Save Profile</button>
                 </div>
               </form>
-            ) : (
+            ) : isEditing === 'user' ? (
               <form onSubmit={saveAppUser} className="modal-form">
                 <div className="form-group">
                   <label>System Alias</label>
@@ -465,6 +497,29 @@ function App() {
                 <div className="form-group"><label>Access Key</label><input type="password" value={userForm.password} onChange={e => setUserForm({...userForm, password: e.target.value})} required placeholder="New password" /></div>
                 <div className="modal-footer">
                   <button type="submit" className="btn-primary full">Save Identity</button>
+                </div>
+              </form>
+            ) : isEditing === 'schema' ? (
+              <form onSubmit={createSchema} className="modal-form">
+                <div className="form-group"><label>Schema Name</label><input value={schemaForm.name} onChange={e => setSchemaForm({name: e.target.value})} required placeholder="e.g. staging" /></div>
+                <div className="modal-footer">
+                  <button type="submit" className="btn-primary full">Create Schema</button>
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={createTable} className="modal-form">
+                <div className="form-group"><label>Table Name</label><input value={tableForm.name} onChange={e => setTableForm({...tableForm, name: e.target.value})} required placeholder="e.g. customers" /></div>
+                <div className="form-group">
+                  <label>Column Definitions (SQL Style)</label>
+                  <textarea 
+                    value={tableForm.columns} 
+                    onChange={e => setTableForm({...tableForm, columns: e.target.value})} 
+                    required 
+                    style={{ background: 'rgba(0,0,0,0.3)', border: '1px solid var(--border)', borderRadius: '12px', padding: '12px', color: 'white', minHeight: '100px', fontSize: '0.85rem' }}
+                  />
+                </div>
+                <div className="modal-footer">
+                  <button type="submit" className="btn-primary full">Create Table in {selectedSchema}</button>
                 </div>
               </form>
             )}
