@@ -432,7 +432,11 @@ function App() {
               <form onSubmit={saveConnection} className="modal-form">
                 <div className="form-group"><label>Profile Name</label><input value={connForm.name} onChange={e => setConnForm({...connForm, name: e.target.value})} required /></div>
                 <div className="form-row">
-                  <div className="form-group"><label>Host</label><input value={connForm.host} onChange={e => setConnForm({...connForm, host: e.target.value})} required /></div>
+                  <div className="form-group"><label>Host</label><input value={connForm.host} onChange={e => {
+                    let val = e.target.value;
+                    if (val.includes('://')) val = val.split('://')[1];
+                    setConnForm({...connForm, host: val});
+                  }} placeholder="e.g. db or 10.103.131.162" required /></div>
                   <div className="form-group"><label>Port</label><input type="number" value={connForm.port} onChange={e => setConnForm({...connForm, port: parseInt(e.target.value)})} required /></div>
                 </div>
                 <div className="form-group"><label>Database</label><input value={connForm.database} onChange={e => setConnForm({...connForm, database: e.target.value})} required /></div>
