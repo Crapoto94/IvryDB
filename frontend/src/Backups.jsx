@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Play, Plus, Trash2, Edit3, RotateCcw, CheckCircle2, AlertCircle, Loader2, XCircle, Mail } from 'lucide-react';
+import { Play, Plus, Trash2, Edit3, RotateCcw, CheckCircle2, AlertCircle, Loader2, XCircle, Mail, Download, ChevronDown, ChevronRight } from 'lucide-react';
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const fmtDate = (d) => (d ? new Date(d).toLocaleString() : '—');
@@ -78,6 +78,23 @@ export default function Backups({ apiFetch, connections }) {
     if (!confirm(`Delete the schedule for ${s.role}? Existing backup files are kept.`)) return;
     try { await call(`/api/backups/schedules/${s.id}`, { method: 'DELETE' }); refresh(); } catch (e) { setMsg({ type: 'err', text: e.message }); }
   };
+  const [openRuns, setOpenRuns] = useState(new Set());
+  const toggleRun = (id) => { const n = new Set(openRuns); n.has(id) ? n.delete(id) : n.add(id); setOpenRuns(n); };
+  const runSize = (r) => r.schemas.reduce((a, s) => a + (s.size || 0), 0);
+
+  // The API needs the Authorization header, so the file is fetched then saved from a blob
+  const download = async (r, index) => {
+    try {
+      const res = await apiFetch(`/api/backups/runs/${r.id}/files/${index}`);
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Error ${res.status}`);
+      const name = /filename="?([^";]+)"?/.exec(res.headers.get('Content-Disposition') || '')?.[1] || `${r.schemas[index].name}.sql.gz`;
+      const url = URL.createObjectURL(await res.blob());
+      const a = Object.assign(document.createElement('a'), { href: url, download: name });
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (e) { setMsg({ type: 'err', text: e.message }); }
+  };
+
   const removeRun = async (r) => {
     if (!confirm('Delete this backup and its files?')) return;
     try { await call(`/api/backups/runs/${r.id}`, { method: 'DELETE' }); if (runId === r.id) setRunId(''); refresh(); } catch (e) { setMsg({ type: 'err', text: e.message }); }
@@ -176,7 +193,7 @@ export default function Backups({ apiFetch, connections }) {
                     <td>{connName(s.connectionId)}</td>
                     <td>{s.frequency === 'daily' ? 'Every day' : s.frequency === 'weekly' ? `Every ${DAYS[s.weekday]}` : `Monthly, day ${s.day}`} at {s.time}</td>
                     <td>{s.retention}</td>
-                    <td>{lr ? <>{pill(lr.status)} <span className="text-muted small">{fmtDate(lr.startedAt)}</span></> : '—'}</td>
+                    <td>{lr ? <>{pill(lr.status)} <span className="text-muted small">{fmtDate(lr.startedAt)} · {fmtSize(runSize(lr))}</span></> : '—'}</td>
                     <td>{s.enabled ? 'Yes' : 'No'}</td>
                     <td><div className="row-actions">
                       <button className="row-icon-btn" title="Run now" disabled={s.running} onClick={() => runNow(s)}>{s.running ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}</button>
@@ -194,17 +211,43 @@ export default function Backups({ apiFetch, connections }) {
         <h3 className="section-title">History</h3>
         <div className="user-list glass-panel">
           <table>
-            <thead><tr><th>Date</th><th>Role</th><th>Status</th><th>Schemas</th><th>Size</th><th>Trigger</th><th></th></tr></thead>
+            <thead><tr><th></th><th>Date</th><th>Role</th><th>Status</th><th>Schemas</th><th>Size</th><th>Trigger</th><th></th></tr></thead>
             <tbody>
-              {runs.map((r) => (
-                <tr key={r.id} title={r.error || r.schemas.filter((s) => !s.ok).map((s) => `${s.name}: ${s.error}`).join('\n')}>
-                  <td>{fmtDate(r.startedAt)}</td><td>{r.role}</td><td>{pill(r.status)}</td>
-                  <td>{r.schemas.filter((s) => s.ok).length}/{r.schemas.length}</td>
-                  <td>{fmtSize(r.schemas.reduce((a, s) => a + (s.size || 0), 0))}</td>
-                  <td>{r.trigger}</td>
-                  <td>{r.status !== 'running' && <button className="row-icon-btn text-error" onClick={() => removeRun(r)}><Trash2 size={14} /></button>}</td>
-                </tr>
-              ))}
+              {runs.map((r) => {
+                const open = openRuns.has(r.id);
+                return (
+                  <React.Fragment key={r.id}>
+                    <tr className="expandable-row" onClick={() => toggleRun(r.id)} title={r.error || ''}>
+                      <td>{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</td>
+                      <td>{fmtDate(r.startedAt)}</td><td>{r.role}</td><td>{pill(r.status)}</td>
+                      <td>{r.schemas.filter((s) => s.ok).length}/{r.schemas.length}</td>
+                      <td>{fmtSize(runSize(r))}</td>
+                      <td>{r.trigger}</td>
+                      <td onClick={(e) => e.stopPropagation()}>{r.status !== 'running' && <button className="row-icon-btn text-error" onClick={() => removeRun(r)}><Trash2 size={14} /></button>}</td>
+                    </tr>
+                    {open && (
+                      <tr className="detail-row"><td></td><td colSpan={7}>
+                        {r.error && <div className="text-error small">{r.error}</div>}
+                        <table className="nexus-table dump-files">
+                          <thead><tr><th>Schema</th><th>Dump</th><th>Size</th></tr></thead>
+                          <tbody>
+                            {r.schemas.map((s, i) => (
+                              <tr key={s.name}>
+                                <td>{s.name}</td>
+                                <td>{s.ok
+                                  ? <button className="link-btn" title="Download" onClick={() => download(r, i)}><Download size={13} /> {s.file}</button>
+                                  : <span className="text-error small">{s.error}</span>}</td>
+                                <td>{s.ok ? fmtSize(s.size) : '—'}</td>
+                              </tr>
+                            ))}
+                            {!r.schemas.length && <tr><td colSpan={3} className="text-muted">Running…</td></tr>}
+                          </tbody>
+                        </table>
+                      </td></tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
               {!runs.length && <tr><td colSpan={7} className="text-muted">No backup yet.</td></tr>}
             </tbody>
           </table>

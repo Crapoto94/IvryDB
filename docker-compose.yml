@@ -24,6 +24,8 @@ services:
       - JWT_SECRET=ivry-secret-key-2026
       - APM_API_URL=${APM_API_URL:-}
       - APM_API_KEY=${APM_API_KEY:-}
+      # APM uses a self-signed certificate: accept it for APM calls only (set to 0 once the CA is trusted)
+      - APM_INSECURE_TLS=${APM_INSECURE_TLS:-1}
     volumes:
       - ./backend/data:/app/data
     ports:

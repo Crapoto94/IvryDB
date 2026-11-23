@@ -586,3 +586,8 @@ td .count-badge { margin-left: 0; display: inline-block; }
   border-color: var(--primary);
 }
 
+
+/* Backup history: dump files */
+.link-btn { display: inline-flex; align-items: center; gap: 6px; background: transparent; color: var(--primary, #10b981); padding: 2px 0; font-size: 0.8rem; text-decoration: underline; cursor: pointer; }
+.link-btn:hover { color: #34d399; }
+.dump-files { width: 100%; }

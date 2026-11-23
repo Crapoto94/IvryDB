@@ -303,6 +303,16 @@ function mount(app, authenticateApp) {
     return runs.slice(0, Math.min(200, parseInt(req.query.limit, 10) || 50)).map(({ dir, ...r }) => r);
   }));
 
+  // Download one dump file (gzip'ed SQL) of a run: the schema is addressed by its index in run.schemas
+  app.get('/api/backups/runs/:id/files/:index', authenticateApp, admin, (req, res) => {
+    const run = load().backups.runs.find((r) => r.id === req.params.id);
+    const item = run?.schemas[parseInt(req.params.index, 10)];
+    if (!item || !item.ok) return res.status(404).json({ error: 'File not found' });
+    const file = path.join(run.dir, item.file);
+    if (!path.resolve(file).startsWith(path.resolve(BACKUP_DIR) + path.sep) || !fs.existsSync(file)) return res.status(410).json({ error: 'Backup file no longer on disk' });
+    res.download(file, `${slug(run.role)}_${slug(item.name)}_${run.startedAt.slice(0, 19).replace(/[-:]/g, '').replace('T', '_')}.sql.gz`);
+  });
+
   app.delete('/api/backups/runs/:id', ...A, wrap(async (req) => {
     mutate((b) => {
       const r = b.runs.find((x) => x.id === req.params.id);
