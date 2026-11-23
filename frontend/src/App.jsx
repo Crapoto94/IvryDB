@@ -33,6 +33,7 @@ function App() {
   const [tableTab, setTableTab] = useState('data'); // 'data' | 'general' | 'columns' | 'constraints' | 'sql'
   const [tableProps, setTableProps] = useState(null);
   const [data, setData] = useState([]);
+  const [columns, setColumns] = useState([]);
   const [sqlQuery, setSqlQuery] = useState('');
   const [schemaFilter, setSchemaFilter] = useState('');
   const [groupByPrefix, setGroupByPrefix] = useState(true);
@@ -41,6 +42,13 @@ function App() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
   const [loading, setLoading] = useState(false);
+  
+  // Table Pagination, Filtering, Sorting State
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(30);
+  const [totalCount, setTotalCount] = useState(0);
+  const [sortConfig, setSortConfig] = useState({ column: null, direction: 'ASC' });
+  const [tableFilters, setTableFilters] = useState({});
 
   // App Login State
   const [appCreds, setAppCreds] = useState({ username: 'admin', password: '' });
@@ -51,6 +59,10 @@ function App() {
   const [userForm, setUserForm] = useState({ username: '', password: '', endDate: '' });
   const [schemaForm, setSchemaForm] = useState({ name: '' });
   const [tableForm, setTableForm] = useState({ name: '', columns: 'id SERIAL PRIMARY KEY, name TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP' });
+
+  // Table/Schema Management State
+  const [mgmtAction, setMgmtAction] = useState(null); // 'copy_table', 'rename_table', 'truncate_table', 'delete_table', 'copy_schema'
+  const [mgmtForm, setMgmtForm] = useState({ targetSchema: '', newName: '', sourceName: '', sourceSchema: '' });
 
   useEffect(() => {
     if (appToken) {
@@ -167,9 +179,20 @@ function App() {
     setView('explorer');
     setExpandedSchemas(new Set(['public']));
     setSchemaTables({});
+    setSelectedSchema('public');
     setSelectedTable(null);
     setData([]);
+    setColumns([]);
+    setCurrentPage(1);
+    setSortConfig({ column: null, direction: 'ASC' });
+    setTableFilters({});
   };
+
+  useEffect(() => {
+    if (view === 'explorer' && selectedConnId && selectedTable) {
+      fetchTableData(selectedSchema, selectedTable);
+    }
+  }, [currentPage, pageSize, sortConfig, tableFilters, selectedTable, selectedConnId]);
 
   useEffect(() => {
     if (view === 'explorer' && selectedConnId) fetchSchemas();
@@ -200,8 +223,8 @@ function App() {
     if (view === 'users' && selectedConnId) fetchDbRoles();
   }, [view, selectedConnId]);
 
-  const fetchTablesForSchema = async (schema) => {
-    if (schemaTables[schema]) return;
+  const fetchTablesForSchema = async (schema, force = false) => {
+    if (!force && schemaTables[schema]) return;
     setLoading(true);
     const res = await apiFetch(`/api/db/tables?schema=${schema}`);
     if (res.ok) {
@@ -217,8 +240,32 @@ function App() {
     setSelectedTable(tableName);
     setTableTab('data');
     setTableProps(null);
-    const res = await apiFetch(`/api/db/tables/${tableName}?schema=${schema}`);
-    if (res.ok) setData(await res.json());
+
+    const params = new URLSearchParams({
+      schema,
+      page: currentPage,
+      limit: pageSize,
+      sortBy: sortConfig.column || '',
+      sortOrder: sortConfig.direction,
+      filters: JSON.stringify(tableFilters)
+    });
+
+    const res = await apiFetch(`/api/db/tables/${tableName}?${params.toString()}`);
+    if (res.ok) {
+      const { rows, totalCount: total } = await res.json();
+      let cols = rows.length > 0 ? Object.keys(rows[0]) : columns;
+      
+      if (cols.length === 0) {
+        const colRes = await apiFetch('/api/db/query', { method: 'POST', body: JSON.stringify({ query: `SELECT column_name FROM information_schema.columns WHERE table_schema = '${schema}' AND table_name = '${tableName}' ORDER BY ordinal_position` }) });
+        if (colRes.ok) {
+           const colData = await colRes.json();
+           cols = colData.map(c => c.column_name);
+        }
+      }
+      setData(rows);
+      setColumns(cols);
+      setTotalCount(total);
+    }
     const pres = await apiFetch(`/api/db/tables/${tableName}/properties?schema=${schema}`);
     if (pres.ok) setTableProps(await pres.json());
     setLoading(false);
@@ -232,6 +279,61 @@ function App() {
     return `${(n / 1073741824).toFixed(2)} GB`;
   };
 
+  const handleSort = (column) => {
+    setSortConfig(prev => ({
+      column,
+      direction: prev.column === column && prev.direction === 'ASC' ? 'DESC' : 'ASC'
+    }));
+    setCurrentPage(1);
+  };
+
+  const handleFilterChange = (column, value) => {
+    setTableFilters(prev => ({ ...prev, [column]: value }));
+    setCurrentPage(1);
+  };
+
+  const executeMgmtAction = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    const { action, sourceName, sourceSchema, targetSchema, newName } = mgmtForm;
+    
+    let url, body;
+    if (action === 'copy_schema') {
+      url = `/api/db/schemas/${sourceSchema}/copy`;
+      body = { targetSchema };
+    } else {
+      url = `/api/db/tables/${sourceName}/action`;
+      body = { action, schema: sourceSchema, targetSchema, newName };
+    }
+
+    const res = await apiFetch(url, { method: 'POST', body: JSON.stringify(body) });
+    if (res.ok) {
+      setMgmtAction(null);
+      fetchSchemas();
+      if (sourceSchema) fetchTablesForSchema(sourceSchema, true);
+      if (targetSchema) fetchTablesForSchema(targetSchema, true);
+      setSuccess('Operation successful');
+      setTimeout(() => setSuccess(null), 3000);
+    } else {
+      const err = await res.json();
+      setError(err.error);
+      setTimeout(() => setError(null), 3000);
+    }
+    setLoading(false);
+  };
+
+  const handleRefresh = () => {
+    fetchSchemas();
+    if (selectedSchema) {
+      fetchTablesForSchema(selectedSchema, true);
+    }
+    if (selectedTable && selectedSchema) {
+      fetchTableData(selectedSchema, selectedTable);
+    } else if (sqlQuery && view === 'console') {
+      runQuery();
+    }
+  };
+
   const runQuery = async () => {
     setLoading(true);
     setSuccess(null);
@@ -240,8 +342,10 @@ function App() {
       const res = await apiFetch('/api/db/query', { method: 'POST', body: JSON.stringify({ query: sqlQuery }) });
       const result = await res.json();
       if (res.ok) { 
-        setData(result); 
+        setData(result);
+        setColumns(result.length > 0 ? Object.keys(result[0]) : []);
         setSuccess('Command executed successfully');
+        setSelectedTable(null); // Clear selected table when running raw query
       } else { 
         setError(result.error); 
       }
@@ -270,7 +374,7 @@ function App() {
       alert(`Table ${tableForm.name} created in ${selectedSchema}`); 
       setIsEditing(null); 
       setTableForm({ name: '', columns: 'id SERIAL PRIMARY KEY, name TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP' }); 
-      fetchTablesForSchema(selectedSchema); 
+      fetchTablesForSchema(selectedSchema, true); 
     } else { alert((await res.json()).error); }
     setLoading(false);
   };
@@ -341,6 +445,7 @@ function App() {
             {g.items.map(s => (
               <div key={s.schema_name} className="tree-item">
                 <button className={`schema-btn ${selectedSchema === s.schema_name ? 'selected' : ''}`} onClick={() => {
+                  setSelectedSchema(s.schema_name);
                   const next = new Set(expandedSchemas);
                   if (next.has(s.schema_name)) next.delete(s.schema_name);
                   else { next.add(s.schema_name); fetchTablesForSchema(s.schema_name); }
@@ -349,14 +454,27 @@ function App() {
                   {expandedSchemas.has(s.schema_name) ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                   <Folder size={14} /> <span>{s.schema_name}</span>
                   <span className="size-label" title={`${s.size_bytes} bytes`}>{formatBytes(s.size_bytes)}</span>
-                  <span className="count-badge"title={`${schemaUserCount[s.schema_name] || 0} user(s) can access this schema`}>{schemaUserCount[s.schema_name] || 0}</span>
+                  <span className="count-badge" title={`${schemaUserCount[s.schema_name] || 0} user(s) can access this schema`}>{schemaUserCount[s.schema_name] || 0}</span>
+                  <button className="schema-action-btn" title="Copy Schema" onClick={(e) => {
+                    e.stopPropagation();
+                    setMgmtForm({ action: 'copy_schema', sourceSchema: s.schema_name, targetSchema: `${s.schema_name}_copy` });
+                    setMgmtAction('copy_schema');
+                  }}><Layers size={12} /></button>
                 </button>
                 {expandedSchemas.has(s.schema_name) && (
                   <div className="table-list">
                     {schemaTables[s.schema_name]?.map(t => (
-                      <button key={t.table_name} className={`table-btn ${selectedTable === t.table_name && selectedSchema === s.schema_name ? 'active' : ''}`} onClick={() => fetchTableData(s.schema_name, t.table_name)}>
-                        <TableIcon size={12} /> {t.table_name}
-                      </button>
+                      <div key={t.table_name} className="table-item-row">
+                        <button className={`table-btn ${selectedTable === t.table_name && selectedSchema === s.schema_name ? 'active' : ''}`} onClick={() => fetchTableData(s.schema_name, t.table_name)}>
+                          <TableIcon size={12} /> {t.table_name}
+                        </button>
+                        <div className="table-actions-toolbar">
+                          <button onClick={() => { setMgmtForm({ action: 'copy', sourceName: t.table_name, sourceSchema: s.schema_name, targetSchema: s.schema_name, newName: `${t.table_name}_copy` }); setMgmtAction('copy_table'); }} title="Copy"><Layers size={10}/></button>
+                          <button onClick={() => { setMgmtForm({ action: 'rename', sourceName: t.table_name, sourceSchema: s.schema_name, newName: t.table_name }); setMgmtAction('rename_table'); }} title="Rename"><Edit3 size={10}/></button>
+                          <button onClick={() => { setMgmtForm({ action: 'truncate', sourceName: t.table_name, sourceSchema: s.schema_name }); setMgmtAction('truncate_table'); }} title="Truncate"><RefreshCw size={10}/></button>
+                          <button className="text-error" onClick={() => { setMgmtForm({ action: 'delete', sourceName: t.table_name, sourceSchema: s.schema_name }); setMgmtAction('delete_table'); }} title="Delete"><Trash2 size={10}/></button>
+                        </div>
+                      </div>
                     ))}
                   </div>
                 )}
@@ -581,6 +699,7 @@ function App() {
                   <Server size={14} /> {selectedSchema} / {selectedTable || 'No Selection'}
                 </div>
                 <div className="nav-actions">
+                   <button className="nav-action-btn" onClick={handleRefresh} title="Rafraîchir les données et la structure" disabled={loading}><RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> {loading ? 'Rafraîchissement...' : 'Rafraîchir'}</button>
                    <button className="nav-action-btn" onClick={() => setIsEditing('schema')} title="New Schema"><Plus size={14}/> Schema</button>
                    <button className="nav-action-btn" onClick={() => setIsEditing('table')} title="New Table" disabled={!selectedSchema}><Plus size={14}/> Table</button>
                 </div>
@@ -656,12 +775,77 @@ function App() {
                 )}
 
                 {(view !== 'explorer' || !selectedTable || tableTab === 'data') && <div className="grid-wrapper glass-panel">
-                  {data.length > 0 ? (
-                    <div className="table-overflow">
-                      <table className="nexus-table">
-                        <thead><tr>{Object.keys(data[0]).map(k => <th key={k}>{k}</th>)}</tr></thead>
-                        <tbody>{data.map((r, i) => <tr key={i}>{Object.values(r).map((v, j) => <td key={j}>{v?.toString()}</td>)}</tr>)}</tbody>
-                      </table>
+                  {columns.length > 0 || selectedTable ? (
+                    <div className="table-container">
+                      <div className="table-overflow">
+                        <table className="nexus-table">
+                          <thead>
+                            <tr>
+                              {columns.map(k => (
+                                <th key={k} onClick={() => handleSort(k)} style={{ cursor: 'pointer' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    {k}
+                                    {sortConfig.column === k && (
+                                      sortConfig.direction === 'ASC' ? <ChevronDown size={14} /> : <ChevronRight size={14} style={{ transform: 'rotate(-90deg)' }} />
+                                    )}
+                                  </div>
+                                </th>
+                              ))}
+                            </tr>
+                            <tr className="filter-row">
+                              {columns.map(k => (
+                                <th key={`filter-${k}`}>
+                                  <input 
+                                    type="text" 
+                                    placeholder={`Filter ${k}...`}
+                                    value={tableFilters[k] || ''}
+                                    onChange={(e) => handleFilterChange(k, e.target.value)}
+                                    className="column-filter"
+                                    onClick={(e) => e.stopPropagation()}
+                                  />
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>{data.map((r, i) => <tr key={i}>{columns.map(k => <td key={k}>{r[k]?.toString()}</td>)}</tr>)}</tbody>
+                        </table>
+                        {data.length === 0 && <div style={{padding: '2rem', textAlign: 'center', opacity: 0.7}}>0 rows match criteria in {selectedTable || 'result'}</div>}
+                      </div>
+
+                      {/* Pagination Controls */}
+                      {selectedTable && (
+                        <div className="pagination-bar">
+                          <div className="pagination-info">
+                            Showing {((currentPage - 1) * pageSize) + 1} to {Math.min(currentPage * pageSize, totalCount)} of {totalCount} results
+                          </div>
+                          <div className="pagination-controls">
+                            <button 
+                              disabled={currentPage === 1} 
+                              onClick={() => setCurrentPage(prev => prev - 1)}
+                              className="page-btn"
+                            >
+                              Previous
+                            </button>
+                            <span className="current-page">Page {currentPage} of {Math.ceil(totalCount / pageSize)}</span>
+                            <button 
+                              disabled={currentPage >= Math.ceil(totalCount / pageSize)} 
+                              onClick={() => setCurrentPage(prev => prev + 1)}
+                              className="page-btn"
+                            >
+                              Next
+                            </button>
+                            <select 
+                              value={pageSize} 
+                              onChange={(e) => { setPageSize(parseInt(e.target.value)); setCurrentPage(1); }}
+                              className="page-size-select"
+                            >
+                              {[10, 20, 30, 50, 100].map(size => (
+                                <option key={size} value={size}>{size} per page</option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ) : <div className="empty-viewport"><Search size={64} /> <p>Search for data in the explorer or run a custom query</p></div>}
                 </div>}
@@ -743,6 +927,68 @@ function App() {
                 </div>
               </form>
             )}
+          </div>
+        </div>
+      )}
+
+      {mgmtAction && (
+        <div className="modal-overlay animate-fade-in">
+          <div className="modal glass-premium animate-zoom">
+            <div className="modal-header">
+              <h3 style={{ textTransform: 'capitalize' }}>{mgmtAction.replace('_', ' ')}</h3>
+              <button onClick={() => setMgmtAction(null)} className="close-btn"><XCircle size={20} /></button>
+            </div>
+            
+            <form onSubmit={executeMgmtAction} className="modal-form">
+              {mgmtAction === 'copy_schema' && (
+                <>
+                  <p className="text-muted small">Clone all tables from <strong>{mgmtForm.sourceSchema}</strong> to a new schema.</p>
+                  <div className="form-group">
+                    <label>New Schema Name</label>
+                    <input value={mgmtForm.targetSchema} onChange={e => setMgmtForm({...mgmtForm, targetSchema: e.target.value})} required placeholder="e.g. public_backup" />
+                  </div>
+                </>
+              )}
+
+              {mgmtAction === 'copy_table' && (
+                <>
+                  <p className="text-muted small">Clone <strong>{mgmtForm.sourceName}</strong> from <strong>{mgmtForm.sourceSchema}</strong>.</p>
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label>Target Schema</label>
+                      <select value={mgmtForm.targetSchema} onChange={e => setMgmtForm({...mgmtForm, targetSchema: e.target.value})}>
+                        {schemas.map(s => <option key={s.schema_name} value={s.schema_name}>{s.schema_name}</option>)}
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>New Table Name</label>
+                      <input value={mgmtForm.newName} onChange={e => setMgmtForm({...mgmtForm, newName: e.target.value})} required />
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {mgmtAction === 'rename_table' && (
+                <div className="form-group">
+                  <label>New Name for {mgmtForm.sourceName}</label>
+                  <input value={mgmtForm.newName} onChange={e => setMgmtForm({...mgmtForm, newName: e.target.value})} required />
+                </div>
+              )}
+
+              {(mgmtAction === 'truncate_table' || mgmtAction === 'delete_table') && (
+                <div className="warning-box">
+                  <AlertCircle size={24} />
+                  <p>Are you sure you want to <strong>{mgmtAction.split('_')[0]}</strong> the table <strong>{mgmtForm.sourceName}</strong> in <strong>{mgmtForm.sourceSchema}</strong>? This action cannot be undone.</p>
+                </div>
+              )}
+
+              <div className="modal-footer">
+                <button type="button" className="btn-secondary" onClick={() => setMgmtAction(null)}>Cancel</button>
+                <button type="submit" className={`btn-primary ${mgmtAction.includes('delete') || mgmtAction.includes('truncate') ? 'btn-danger' : ''}`} disabled={loading}>
+                  {loading ? <Loader2 className="animate-spin" /> : 'Confirm Operation'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

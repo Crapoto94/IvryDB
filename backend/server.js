@@ -133,11 +133,69 @@ app.get('/api/db/tables', authenticateApp, injectDb, async (req, res) => {
 });
 
 app.get('/api/db/tables/:name', authenticateApp, injectDb, async (req, res) => {
-  const { schema = 'public' } = req.query;
+  const { 
+    schema = 'public', 
+    page = 1, 
+    limit = 30, 
+    sortBy, 
+    sortOrder = 'ASC', 
+    filters 
+  } = req.query;
+  
+  const offset = (parseInt(page) - 1) * parseInt(limit);
+  const parsedFilters = filters ? JSON.parse(filters) : {};
+  
   try {
-    const result = await req.pool.query(`SELECT * FROM "${schema}"."${req.params.name}" LIMIT 100`);
-    res.json(result.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    // 1. Get column names for validation (to prevent SQL injection on ORDER BY)
+    const colRes = await req.pool.query(
+      `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`,
+      [schema, req.params.name]
+    );
+    const validColumns = colRes.rows.map(r => r.column_name);
+
+    // 2. Build WHERE clause
+    const whereClauses = [];
+    const values = [];
+    let valIdx = 1;
+
+    Object.entries(parsedFilters).forEach(([col, val]) => {
+      if (validColumns.includes(col) && val !== undefined && val !== '') {
+        whereClauses.push(`"${col}"::text ILIKE $${valIdx}`);
+        values.push(`%${val}%`);
+        valIdx++;
+      }
+    });
+
+    const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+    // 3. Build ORDER BY clause
+    let orderByStr = '';
+    if (sortBy && validColumns.includes(sortBy)) {
+      const order = sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+      orderByStr = `ORDER BY "${sortBy}" ${order}`;
+    }
+
+    // 4. Final Query with COUNT(*) OVER() to get total count in one go
+    const query = `
+      SELECT *, COUNT(*) OVER() as total_count 
+      FROM "${schema}"."${req.params.name}"
+      ${whereStr}
+      ${orderByStr}
+      LIMIT $${valIdx} OFFSET $${valIdx + 1}
+    `;
+    
+    values.push(parseInt(limit), offset);
+    
+    const result = await req.pool.query(query, values);
+    
+    const totalCount = result.rows.length > 0 ? parseInt(result.rows[0].total_count) : 0;
+    const rows = result.rows.map(({ total_count, ...row }) => row);
+
+    res.json({ rows, totalCount });
+  } catch (err) { 
+    console.error(err);
+    res.status(500).json({ error: err.message }); 
+  }
 });
 
 // Table properties (general, columns, constraints, indexes, generated DDL)
@@ -231,6 +289,74 @@ app.put('/api/db/roles/:name/valid-until', authenticateApp, injectDb, async (req
     await req.pool.query(`ALTER ROLE ${quoteIdent(req.params.name)} VALID UNTIL ${until}`);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- SCHEMA MANAGEMENT ---
+app.post('/api/db/schemas/:name/copy', authenticateApp, injectDb, async (req, res) => {
+  const sourceSchema = req.params.name;
+  const { targetSchema } = req.body;
+
+  if (!targetSchema) return res.status(400).json({ error: 'Target schema name required' });
+
+  try {
+    // 1. Check if target schema already exists
+    const schemaCheck = await req.pool.query(
+      'SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1',
+      [targetSchema]
+    );
+    if (schemaCheck.rows.length > 0) return res.status(400).json({ error: `Schema "${targetSchema}" already exists` });
+
+    // 2. Create the target schema
+    await req.pool.query(`CREATE SCHEMA "${targetSchema}"`);
+
+    // 3. Get all tables from source schema
+    const tablesRes = await req.pool.query(
+      'SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = \'BASE TABLE\'',
+      [sourceSchema]
+    );
+
+    // 4. Copy each table
+    for (const row of tablesRes.rows) {
+      const tableName = row.table_name;
+      await req.pool.query(`CREATE TABLE "${targetSchema}"."${tableName}" AS SELECT * FROM "${sourceSchema}"."${tableName}"`);
+    }
+
+    res.json({ success: true, message: `Schema "${sourceSchema}" copied to "${targetSchema}"` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- TABLE MANAGEMENT ---
+app.post('/api/db/tables/:name/action', authenticateApp, injectDb, async (req, res) => {
+  const { action, schema = 'public', targetSchema, newName } = req.body;
+  const tableName = req.params.name;
+
+  if (!action) return res.status(400).json({ error: 'Action required' });
+
+  try {
+    switch (action) {
+      case 'copy':
+        if (!targetSchema || !newName) return res.status(400).json({ error: 'Target schema and new name required' });
+        await req.pool.query(`CREATE TABLE "${targetSchema}"."${newName}" AS SELECT * FROM "${schema}"."${tableName}"`);
+        break;
+      case 'rename':
+        if (!newName) return res.status(400).json({ error: 'New name required' });
+        await req.pool.query(`ALTER TABLE "${schema}"."${tableName}" RENAME TO "${newName}"`);
+        break;
+      case 'truncate':
+        await req.pool.query(`TRUNCATE TABLE "${schema}"."${tableName}"`);
+        break;
+      case 'delete':
+        await req.pool.query(`DROP TABLE "${schema}"."${tableName}"`);
+        break;
+      default:
+        return res.status(400).json({ error: `Unknown action: ${action}` });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // --- USER MANAGEMENT (Admin Only) ---
