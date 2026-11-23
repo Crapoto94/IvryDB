@@ -3,7 +3,10 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const db = require('./db');
 const storage = require('./storage');
-require('dotenv').config();
+// .env may sit next to the backend or at the repository root
+const path = require('path');
+require('dotenv').config({ path: [path.join(__dirname, '.env'), path.join(__dirname, '..', '.env')], quiet: true });
+const apm = require('./apm');
 
 const app = express();
 const PORT = process.env.PORT || 3003;
@@ -32,6 +35,9 @@ app.post('/api/app/login', (req, res) => {
   const data = storage.readData();
   const user = data.users.find(u => u.username === username && u.password === password);
   
+  if (user && user.endDate && new Date().toISOString().slice(0, 10) > user.endDate) {
+    return res.status(401).json({ error: 'Account expired' });
+  }
   if (user) {
     const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, username });
@@ -104,9 +110,12 @@ const injectDb = (req, res, next) => {
 app.get('/api/db/schemas', authenticateApp, injectDb, async (req, res) => {
   try {
     const result = await req.pool.query(`
-      SELECT schema_name FROM information_schema.schemata 
-      WHERE schema_name NOT IN ('information_schema', 'pg_catalog')
-      ORDER BY schema_name
+      SELECT n.nspname AS schema_name,
+        COALESCE((SELECT sum(pg_total_relation_size(c.oid)) FROM pg_class c
+                  WHERE c.relnamespace = n.oid AND c.relkind IN ('r','m')), 0)::bigint AS size_bytes
+      FROM pg_namespace n
+      WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+      ORDER BY n.nspname
     `);
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -131,10 +140,96 @@ app.get('/api/db/tables/:name', authenticateApp, injectDb, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Table properties (general, columns, constraints, indexes, generated DDL)
+app.get('/api/db/tables/:name/properties', authenticateApp, injectDb, async (req, res) => {
+  const { schema = 'public' } = req.query;
+  const name = req.params.name;
+  const qi = (s) => '"' + String(s).replace(/"/g, '""') + '"';
+  try {
+    const general = (await req.pool.query(`
+      SELECT c.relkind, r.rolname AS owner, c.reltuples::bigint AS est_rows,
+             pg_total_relation_size(c.oid) AS total_bytes, pg_relation_size(c.oid) AS table_bytes,
+             obj_description(c.oid, 'pg_class') AS comment
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_roles r ON r.oid = c.relowner
+      WHERE n.nspname = $1 AND c.relname = $2`, [schema, name])).rows[0];
+    if (!general) return res.status(404).json({ error: 'Table not found' });
+
+    const columns = (await req.pool.query(`
+      SELECT a.attnum AS position, a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type,
+             NOT a.attnotnull AS nullable, pg_get_expr(d.adbin, d.adrelid) AS "default",
+             col_description(a.attrelid, a.attnum) AS comment
+      FROM pg_attribute a
+      JOIN pg_class c ON c.oid = a.attrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+      WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped
+      ORDER BY a.attnum`, [schema, name])).rows;
+
+    const constraints = (await req.pool.query(`
+      SELECT con.conname AS name,
+             CASE con.contype WHEN 'p' THEN 'PRIMARY KEY' WHEN 'f' THEN 'FOREIGN KEY' WHEN 'u' THEN 'UNIQUE' WHEN 'c' THEN 'CHECK' ELSE con.contype::text END AS type,
+             pg_get_constraintdef(con.oid) AS definition
+      FROM pg_constraint con
+      JOIN pg_class c ON c.oid = con.conrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = $1 AND c.relname = $2
+      ORDER BY con.contype, con.conname`, [schema, name])).rows;
+
+    const indexes = (await req.pool.query(
+      `SELECT indexname AS name, indexdef AS definition FROM pg_indexes WHERE schemaname = $1 AND tablename = $2 ORDER BY indexname`,
+      [schema, name])).rows;
+
+    const colLines = columns.map(c =>
+      `  ${qi(c.name)} ${c.type}${c.nullable ? '' : ' NOT NULL'}${c.default ? ' DEFAULT ' + c.default : ''}`);
+    const conLines = constraints.map(c => `  CONSTRAINT ${qi(c.name)} ${c.definition}`);
+    let ddl = `CREATE TABLE ${qi(schema)}.${qi(name)} (\n${colLines.concat(conLines).join(',\n')}\n);`;
+    const pkIdx = new Set(constraints.filter(c => c.type === 'PRIMARY KEY' || c.type === 'UNIQUE').map(c => c.name));
+    indexes.filter(i => !pkIdx.has(i.name)).forEach(i => { ddl += `\n${i.definition};`; });
+
+    res.json({ general, columns, constraints, indexes, ddl });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post('/api/db/query', authenticateApp, injectDb, async (req, res) => {
   try {
     const result = await req.pool.query(req.body.query);
     res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- DATABASE ROLES (PostgreSQL users) ---
+const quoteIdent = (s) => '"' + String(s).replace(/"/g, '""') + '"';
+
+// Login roles with the schemas they can access (USAGE) and their expiry date
+app.get('/api/db/roles', authenticateApp, injectDb, async (req, res) => {
+  try {
+    const result = await req.pool.query(`
+      SELECT r.rolname AS name, r.rolsuper AS superuser, r.rolvaliduntil AS valid_until,
+        CASE WHEN r.rolsuper THEN ARRAY[]::text[] ELSE ARRAY(
+          SELECT n.nspname::text FROM pg_namespace n
+          WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+            AND has_schema_privilege(r.oid, n.oid, 'USAGE')
+          ORDER BY n.nspname) END AS schemas
+      FROM pg_roles r
+      WHERE r.rolcanlogin AND r.rolname !~ '^pg_'
+      ORDER BY r.rolname
+    `);
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Set / clear the end date (VALID UNTIL) of a role. Body: { date: 'YYYY-MM-DD' | null }
+app.put('/api/db/roles/:name/valid-until', authenticateApp, injectDb, async (req, res) => {
+  const { date } = req.body;
+  if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Invalid date' });
+  try {
+    const exists = await req.pool.query('SELECT 1 FROM pg_roles WHERE rolname = $1 AND rolcanlogin', [req.params.name]);
+    if (!exists.rowCount) return res.status(404).json({ error: 'Role not found' });
+    const until = date ? `'${date} 23:59:59'` : `'infinity'`;
+    await req.pool.query(`ALTER ROLE ${quoteIdent(req.params.name)} VALID UNTIL ${until}`);
+    res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -149,23 +244,24 @@ app.get('/api/app/users', authenticateApp, (req, res) => {
 
 app.post('/api/app/users', authenticateApp, (req, res) => {
   if (req.user !== 'admin') return res.status(403).json({ error: 'Access denied' });
-  const { username, password } = req.body;
+  const { username, password, endDate } = req.body;
   const data = storage.readData();
   if (data.users.find(u => u.username === username)) return res.status(400).json({ error: 'User exists' });
-  
-  data.users.push({ username, password, connections: [] });
+
+  data.users.push({ username, password, endDate: endDate || null, connections: [] });
   storage.writeData(data);
   res.json({ success: true });
 });
 
 app.put('/api/app/users/:username', authenticateApp, (req, res) => {
   if (req.user !== 'admin') return res.status(403).json({ error: 'Access denied' });
-  const { password } = req.body;
+  const { password, endDate } = req.body;
   const data = storage.readData();
   const user = data.users.find(u => u.username === req.params.username);
   if (!user) return res.status(404).json({ error: 'Not found' });
-  
-  user.password = password;
+
+  if (password) user.password = password;
+  if (endDate !== undefined) user.endDate = endDate || null;
   storage.writeData(data);
   res.json({ success: true });
 });
@@ -179,6 +275,25 @@ app.delete('/api/app/users/:username', authenticateApp, (req, res) => {
   storage.writeData(data);
   res.json({ success: true });
 });
+
+// --- NOTIFICATIONS through APM (mail / SMS) ---
+const adminOnly = (req, res, next) => (req.user === 'admin' ? next() : res.status(403).json({ error: 'Access denied' }));
+app.get('/api/notify/status', authenticateApp, adminOnly, (req, res) => res.json({ configured: apm.isConfigured() }));
+app.post('/api/notify/mail', authenticateApp, adminOnly, async (req, res) => {
+  const { to, subject, content } = req.body || {};
+  if (!to || !subject || !content) return res.status(400).json({ error: 'to, subject and content are required' });
+  try { res.json(await apm.sendMail(to, subject, content)); } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+app.post('/api/notify/sms', authenticateApp, adminOnly, async (req, res) => {
+  const { mobile, message } = req.body || {};
+  if (!mobile || !message) return res.status(400).json({ error: 'mobile and message are required' });
+  try { res.json(await apm.sendSms(mobile, message)); } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
+// --- BACKUPS ---
+const backup = require('./backup');
+backup.mount(app, authenticateApp);
+backup.startScheduler();
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);

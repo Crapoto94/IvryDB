@@ -1,5 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { Database, Table as TableIcon, Terminal, Search, Play, RefreshCw, AlertCircle, Loader2, LogOut, Layers, Server, ChevronRight, ChevronDown, Folder, Plus, Trash2, CheckCircle2, XCircle, Edit3, ArrowLeft, Users, Shield, Settings, Activity, Cpu } from 'lucide-react';
+import { Database, Table as TableIcon, Terminal, Search, Play, RefreshCw, AlertCircle, Loader2, LogOut, Layers, Server, ChevronRight, ChevronDown, Folder, Plus, Trash2, CheckCircle2, XCircle, Edit3, ArrowLeft, Users, Shield, Settings, Activity, Cpu, HardDrive } from 'lucide-react';
+import Backups from './Backups.jsx';
+
+const formatBytes = (b) => {
+  b = Number(b) || 0;
+  if (b < 1024) return `${b} B`;
+  const u = ['KB', 'MB', 'GB', 'TB'];
+  let i = -1;
+  do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
+  return `${b >= 100 ? Math.round(b) : b.toFixed(1)} ${u[i]}`;
+};
 
 function App() {
   const [appToken, setAppToken] = useState(localStorage.getItem('app_token'));
@@ -10,16 +20,24 @@ function App() {
   
   // App Users State
   const [appUsers, setAppUsers] = useState([]);
-  
+  const [usersTab, setUsersTab] = useState('roles'); // 'roles' (PostgreSQL) | 'app'
+  const [dbRoles, setDbRoles] = useState([]);
+  const [expandedRoles, setExpandedRoles] = useState(new Set());
+
   // Explorer State
   const [schemas, setSchemas] = useState([]);
   const [expandedSchemas, setExpandedSchemas] = useState(new Set(['public']));
   const [schemaTables, setSchemaTables] = useState({});
   const [selectedSchema, setSelectedSchema] = useState('public');
   const [selectedTable, setSelectedTable] = useState(null);
+  const [tableTab, setTableTab] = useState('data'); // 'data' | 'general' | 'columns' | 'constraints' | 'sql'
+  const [tableProps, setTableProps] = useState(null);
   const [data, setData] = useState([]);
   const [sqlQuery, setSqlQuery] = useState('');
-  
+  const [schemaFilter, setSchemaFilter] = useState('');
+  const [groupByPrefix, setGroupByPrefix] = useState(true);
+  const [openGroups, setOpenGroups] = useState(new Set());
+
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -30,7 +48,7 @@ function App() {
   // Connection/User Form State
   const [isEditing, setIsEditing] = useState(false); // Can be 'connection' or 'user'
   const [connForm, setConnForm] = useState({ id: '', name: '', host: 'localhost', port: 5432, database: 'postgres', user: 'postgres', password: '' });
-  const [userForm, setUserForm] = useState({ username: '', password: '' });
+  const [userForm, setUserForm] = useState({ username: '', password: '', endDate: '' });
   const [schemaForm, setSchemaForm] = useState({ name: '' });
   const [tableForm, setTableForm] = useState({ name: '', columns: 'id SERIAL PRIMARY KEY, name TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP' });
 
@@ -130,8 +148,8 @@ function App() {
     if (res.ok) { 
       fetchAppUsers(); 
       setIsEditing(false); 
-      setUserForm({ username: '', password: '' }); 
-    } else { 
+      setUserForm({ username: '', password: '', endDate: '' });
+    } else {
       const err = await res.json(); 
       alert(err.error); 
     }
@@ -160,7 +178,27 @@ function App() {
   const fetchSchemas = async () => {
     const res = await apiFetch('/api/db/schemas');
     if (res.ok) setSchemas(await res.json());
+    fetchDbRoles();
   };
+
+  const fetchDbRoles = async () => {
+    if (!selectedConnId) return;
+    const res = await apiFetch('/api/db/roles');
+    if (res.ok) setDbRoles(await res.json());
+  };
+
+  const setRoleEndDate = async (name, date) => {
+    const res = await apiFetch(`/api/db/roles/${encodeURIComponent(name)}/valid-until`, { method: 'PUT', body: JSON.stringify({ date: date || null }) });
+    if (res.ok) fetchDbRoles(); else alert((await res.json()).error);
+  };
+
+  // schema name -> number of (non-superuser) login roles that can use it
+  const schemaUserCount = {};
+  dbRoles.forEach(r => r.schemas.forEach(s => { schemaUserCount[s] = (schemaUserCount[s] || 0) + 1; }));
+
+  useEffect(() => {
+    if (view === 'users' && selectedConnId) fetchDbRoles();
+  }, [view, selectedConnId]);
 
   const fetchTablesForSchema = async (schema) => {
     if (schemaTables[schema]) return;
@@ -177,9 +215,21 @@ function App() {
     setLoading(true);
     setSelectedSchema(schema);
     setSelectedTable(tableName);
+    setTableTab('data');
+    setTableProps(null);
     const res = await apiFetch(`/api/db/tables/${tableName}?schema=${schema}`);
     if (res.ok) setData(await res.json());
+    const pres = await apiFetch(`/api/db/tables/${tableName}/properties?schema=${schema}`);
+    if (pres.ok) setTableProps(await pres.json());
     setLoading(false);
+  };
+
+  const formatBytes = (n) => {
+    n = Number(n) || 0;
+    if (n < 1024) return `${n} B`;
+    if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`;
+    return `${(n / 1073741824).toFixed(2)} GB`;
   };
 
   const runQuery = async () => {
@@ -225,6 +275,25 @@ function App() {
     setLoading(false);
   };
 
+  const filteredSchemas = schemas.filter(s => s.schema_name.toLowerCase().includes(schemaFilter.trim().toLowerCase()));
+  const groupedSchemas = (() => {
+    if (!groupByPrefix) return [{ name: null, items: filteredSchemas }];
+    const byPrefix = {};
+    filteredSchemas.forEach(s => {
+      const p = s.schema_name.slice(0, 3).toLowerCase();
+      (byPrefix[p] = byPrefix[p] || []).push(s);
+    });
+    const groups = [];
+    const singles = [];
+    Object.entries(byPrefix).forEach(([p, items]) => {
+      if (items.length > 1) groups.push({ name: p, items });
+      else singles.push(items[0]);
+    });
+    const out = groups.map(g => g);
+    singles.forEach(s => out.push({ name: null, items: [s] }));
+    return out.sort((a, b) => (a.name || a.items[0].schema_name).toLowerCase().localeCompare((b.name || b.items[0].schema_name).toLowerCase()));
+  })();
+
   // --- UI COMPONENTS ---
 
   const Sidebar = () => (
@@ -243,13 +312,33 @@ function App() {
         {appUser === 'admin' && (
           <button className={`nav-link ${view === 'users' ? 'active' : ''}`} onClick={() => { setView('users'); fetchAppUsers(); }}><Users size={18} /> User Access</button>
         )}
+        {appUser === 'admin' && (
+          <button className={`nav-link ${view === 'backups' ? 'active' : ''}`} onClick={() => setView('backups')}><HardDrive size={18} /> Backups</button>
+        )}
       </nav>
 
       {view === 'explorer' && (
         <div className="mini-explorer">
-          <div className="explorer-title">Schemata</div>
+          <div className="explorer-title">Schemata ({filteredSchemas.length}/{schemas.length})</div>
+          <input className="tree-search" value={schemaFilter} onChange={e => setSchemaFilter(e.target.value)} placeholder="Filtrer les schémas..." />
+          <label className="tree-group-toggle"><input type="checkbox" checked={groupByPrefix} onChange={e => setGroupByPrefix(e.target.checked)} /> Grouper par préfixe (3 lettres)</label>
           <div className="tree-scroll">
-            {schemas.map(s => (
+            {groupedSchemas.map(g => {
+              const open = !g.name || !!schemaFilter || openGroups.has(g.name);
+              return (
+              <div key={g.name || '_'} className="tree-group">
+                {g.name && (
+                  <button className="group-btn" onClick={() => {
+                    const next = new Set(openGroups);
+                    if (next.has(g.name)) next.delete(g.name); else next.add(g.name);
+                    setOpenGroups(next);
+                  }}>
+                    {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                    <Layers size={14} /> <span>{g.name}*</span><span className="count-pill">{g.items.length}</span>
+                  </button>
+                )}
+                {open && <div className={g.name ? 'group-items' : ''}>
+            {g.items.map(s => (
               <div key={s.schema_name} className="tree-item">
                 <button className={`schema-btn ${selectedSchema === s.schema_name ? 'selected' : ''}`} onClick={() => {
                   const next = new Set(expandedSchemas);
@@ -259,6 +348,8 @@ function App() {
                 }}>
                   {expandedSchemas.has(s.schema_name) ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                   <Folder size={14} /> <span>{s.schema_name}</span>
+                  <span className="size-label" title={`${s.size_bytes} bytes`}>{formatBytes(s.size_bytes)}</span>
+                  <span className="count-badge"title={`${schemaUserCount[s.schema_name] || 0} user(s) can access this schema`}>{schemaUserCount[s.schema_name] || 0}</span>
                 </button>
                 {expandedSchemas.has(s.schema_name) && (
                   <div className="table-list">
@@ -271,6 +362,10 @@ function App() {
                 )}
               </div>
             ))}
+                </div>}
+              </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -387,37 +482,91 @@ function App() {
           </div>
         )}
 
+        {view === 'backups' && <Backups apiFetch={apiFetch} connections={connections} />}
+
         {view === 'users' && (
           <div className="content-page animate-fade-in">
              <header className="content-header">
                 <div className="header-title">
                   <h2>User Access Control</h2>
-                  <p className="text-muted">Manage administrative privileges</p>
+                  <p className="text-muted">{usersTab === 'roles' ? 'PostgreSQL roles and the schemas they can access' : 'Accounts allowed to sign in to this console'}</p>
                 </div>
-                <button className="action-btn" onClick={() => { setUserForm({ username: '', password: '' }); setIsEditing('user'); }}><Plus size={18} /> Create Account</button>
+                {usersTab === 'app' && <button className="action-btn" onClick={() => { setUserForm({ username: '', password: '', endDate: '' }); setIsEditing('user'); }}><Plus size={18} /> Create Account</button>}
+                {usersTab === 'roles' && (
+                  <select className="conn-select" value={selectedConnId || ''} onChange={e => setSelectedConnId(e.target.value || null)}>
+                    <option value="">Select a connection…</option>
+                    {connections.map(c => <option key={c.id} value={c.id}>{c.name || c.host}</option>)}
+                  </select>
+                )}
              </header>
-             
+
+             <div className="nav-tabs users-tabs">
+               <button className={`tab ${usersTab === 'roles' ? 'active' : ''}`} onClick={() => setUsersTab('roles')}>Database roles</button>
+               <button className={`tab ${usersTab === 'app' ? 'active' : ''}`} onClick={() => setUsersTab('app')}>Console accounts</button>
+             </div>
+
+             {usersTab === 'roles' && (
+               <div className="user-list glass-panel">
+                 {!selectedConnId ? <p className="text-muted pad">Select a connection to list its roles.</p> : (
+                 <table>
+                   <thead><tr><th></th><th>Role</th><th>Schemas</th><th>End date</th><th>Status</th></tr></thead>
+                   <tbody>
+                     {dbRoles.map(r => {
+                       const open = expandedRoles.has(r.name);
+                       const until = r.valid_until && r.valid_until !== 'infinity' ? String(r.valid_until).slice(0, 10) : '';
+                       const expired = until && until < new Date().toISOString().slice(0, 10);
+                       return (
+                         <React.Fragment key={r.name}>
+                           <tr className="expandable-row" onClick={() => { const n = new Set(expandedRoles); open ? n.delete(r.name) : n.add(r.name); setExpandedRoles(n); }}>
+                             <td>{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</td>
+                             <td><div className="user-name-cell">{r.name} {r.superuser && <Shield size={12} className="text-primary" title="Superuser"/>}</div></td>
+                             <td>{r.superuser ? 'All' : <span className="count-badge">{r.schemas.length}</span>}</td>
+                             <td onClick={e => e.stopPropagation()}>
+                               <input type="date" className="date-input" value={until} onChange={e => setRoleEndDate(r.name, e.target.value)} disabled={r.superuser} />
+                             </td>
+                             <td><span className={`status-pill ${expired ? 'expired' : 'active'}`}>{expired ? 'Expired' : 'Active'}</span></td>
+                           </tr>
+                           {open && (
+                             <tr className="detail-row"><td></td><td colSpan={4}>
+                               {r.superuser ? <span className="text-muted">Superuser: full access to every schema</span> :
+                                 r.schemas.length ? <div className="chip-list">{r.schemas.map(sc => <span key={sc} className="chip"><Folder size={11} /> {sc}</span>)}</div> :
+                                 <span className="text-muted">No schema access</span>}
+                             </td></tr>
+                           )}
+                         </React.Fragment>
+                       );
+                     })}
+                   </tbody>
+                 </table>
+                 )}
+               </div>
+             )}
+
+             {usersTab === 'app' && (
              <div className="user-list glass-panel">
                 <table>
-                  <thead><tr><th>Avatar</th><th>Username</th><th>Created</th><th>Status</th><th>Actions</th></tr></thead>
+                  <thead><tr><th>Avatar</th><th>Username</th><th>End date</th><th>Status</th><th>Actions</th></tr></thead>
                   <tbody>
-                    {appUsers.map(u => (
+                    {appUsers.map(u => {
+                      const expired = u.endDate && u.endDate < new Date().toISOString().slice(0, 10);
+                      return (
                       <tr key={u.username}>
                         <td><div className="mini-avatar">{u.username[0].toUpperCase()}</div></td>
                         <td><div className="user-name-cell">{u.username} {u.username === 'admin' && <Shield size={12} className="text-primary"/>}</div></td>
-                        <td>Mar 21, 2026</td>
-                        <td><span className="status-pill active">Active</span></td>
+                        <td>{u.endDate || '—'}</td>
+                        <td><span className={`status-pill ${expired ? 'expired' : 'active'}`}>{expired ? 'Expired' : 'Active'}</span></td>
                         <td>
                           <div className="row-actions">
-                            <button className="row-icon-btn" onClick={() => { setUserForm({ ...u, password: '' }); setIsEditing('user'); }}><Edit3 size={14}/></button>
+                            <button className="row-icon-btn" onClick={() => { setUserForm({ username: u.username, endDate: u.endDate || '', password: '' }); setIsEditing('user'); }}><Edit3 size={14}/></button>
                             {u.username !== 'admin' && <button className="row-icon-btn text-error" onClick={() => deleteAppUser(u.username)}><Trash2 size={14}/></button>}
                           </div>
                         </td>
                       </tr>
-                    ))}
+                    );})}
                   </tbody>
                 </table>
              </div>
+             )}
           </div>
         )}
 
@@ -451,7 +600,62 @@ function App() {
                   </div>
                 )}
                 
-                <div className="grid-wrapper glass-panel">
+                {view === 'explorer' && selectedTable && (
+                  <div className="props-tabs glass-panel">
+                    {[['data', 'Données'], ['general', 'Général'], ['columns', 'Colonnes'], ['constraints', 'Contraintes & index'], ['sql', 'SQL']].map(([k, label]) => (
+                      <button key={k} className={`props-tab ${tableTab === k ? 'active' : ''}`} onClick={() => setTableTab(k)}>{label}</button>
+                    ))}
+                  </div>
+                )}
+
+                {view === 'explorer' && selectedTable && tableTab !== 'data' && (
+                  <div className="grid-wrapper glass-panel props-panel">
+                    {!tableProps ? <div className="empty-viewport"><Loader2 className="animate-spin" size={32} /></div> : (
+                      <>
+                        {tableTab === 'general' && (
+                          <dl className="props-list">
+                            <dt>Schéma</dt><dd>{selectedSchema}</dd>
+                            <dt>Table</dt><dd>{selectedTable}</dd>
+                            <dt>Type</dt><dd>{{ r: 'Table', v: 'Vue', m: 'Vue matérialisée', p: 'Table partitionnée', f: 'Table étrangère' }[tableProps.general.relkind] || tableProps.general.relkind}</dd>
+                            <dt>Propriétaire</dt><dd>{tableProps.general.owner}</dd>
+                            <dt>Lignes (estimation)</dt><dd>{Number(tableProps.general.est_rows) < 0 ? 'n/a (jamais analysée)' : Number(tableProps.general.est_rows).toLocaleString('fr-FR')}</dd>
+                            <dt>Taille table</dt><dd>{formatBytes(tableProps.general.table_bytes)}</dd>
+                            <dt>Taille totale (index inclus)</dt><dd>{formatBytes(tableProps.general.total_bytes)}</dd>
+                            <dt>Commentaire</dt><dd>{tableProps.general.comment || '—'}</dd>
+                          </dl>
+                        )}
+                        {tableTab === 'columns' && (
+                          <div className="table-overflow"><table className="nexus-table">
+                            <thead><tr><th>#</th><th>Nom</th><th>Type</th><th>Nullable</th><th>Défaut</th><th>Commentaire</th></tr></thead>
+                            <tbody>{tableProps.columns.map(c => (
+                              <tr key={c.name}><td>{c.position}</td><td>{c.name}</td><td>{c.type}</td><td>{c.nullable ? 'oui' : 'non'}</td><td>{c.default || ''}</td><td>{c.comment || ''}</td></tr>
+                            ))}</tbody>
+                          </table></div>
+                        )}
+                        {tableTab === 'constraints' && (
+                          <div className="table-overflow">
+                            <table className="nexus-table">
+                              <thead><tr><th>Contrainte</th><th>Type</th><th>Définition</th></tr></thead>
+                              <tbody>{tableProps.constraints.length ? tableProps.constraints.map(c => <tr key={c.name}><td>{c.name}</td><td>{c.type}</td><td>{c.definition}</td></tr>) : <tr><td colSpan={3}>Aucune contrainte</td></tr>}</tbody>
+                            </table>
+                            <table className="nexus-table" style={{ marginTop: 16 }}>
+                              <thead><tr><th>Index</th><th>Définition</th></tr></thead>
+                              <tbody>{tableProps.indexes.length ? tableProps.indexes.map(i => <tr key={i.name}><td>{i.name}</td><td>{i.definition}</td></tr>) : <tr><td colSpan={2}>Aucun index</td></tr>}</tbody>
+                            </table>
+                          </div>
+                        )}
+                        {tableTab === 'sql' && (
+                          <div>
+                            <button className="nav-action-btn" onClick={() => navigator.clipboard?.writeText(tableProps.ddl)}>Copier</button>
+                            <pre className="ddl-view">{tableProps.ddl}</pre>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {(view !== 'explorer' || !selectedTable || tableTab === 'data') && <div className="grid-wrapper glass-panel">
                   {data.length > 0 ? (
                     <div className="table-overflow">
                       <table className="nexus-table">
@@ -460,7 +664,7 @@ function App() {
                       </table>
                     </div>
                   ) : <div className="empty-viewport"><Search size={64} /> <p>Search for data in the explorer or run a custom query</p></div>}
-                </div>
+                </div>}
              </div>
           </div>
         )}
@@ -503,13 +707,14 @@ function App() {
                   <input 
                     value={userForm.username} 
                     onChange={e => setUserForm({...userForm, username: e.target.value})} 
-                    disabled={appUsers.some(u => u.username === userForm.username && userForm.password === '')} 
+                    disabled={isEditing === 'user' && appUsers.some(u => u.username === userForm.username)} 
                     required 
                     placeholder="Enter unique username"
                   />
                   {appUsers.some(u => u.username === userForm.username) && <p className="text-muted small">Update password for existing user</p>}
                 </div>
-                <div className="form-group"><label>Access Key</label><input type="password" value={userForm.password} onChange={e => setUserForm({...userForm, password: e.target.value})} required placeholder="New password" /></div>
+                <div className="form-group"><label>Access Key</label><input type="password" value={userForm.password} onChange={e => setUserForm({...userForm, password: e.target.value})} required={!appUsers.some(u => u.username === userForm.username)} placeholder={appUsers.some(u => u.username === userForm.username) ? 'Leave empty to keep current password' : 'New password'} /></div>
+                <div className="form-group"><label>End date</label><input type="date" value={userForm.endDate || ''} onChange={e => setUserForm({...userForm, endDate: e.target.value})} /></div>
                 <div className="modal-footer">
                   <button type="submit" className="btn-primary full">Save Identity</button>
                 </div>
